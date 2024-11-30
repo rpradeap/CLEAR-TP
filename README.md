@@ -10,4 +10,6 @@ Total phosphorus (TP) concentration significantly impacts river ecosystems, yet 
 - **Remote Sensing Data**:  https://doi.org/10.1029/2020GL088946
 - **ML Model**:  https://doi.org/10.1029/2024JG008121
 
+  Corresponding Author: ramtelpp@mail.uc.edu
+
 
