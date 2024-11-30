@@ -7,5 +7,7 @@ Total phosphorus (TP) concentration significantly impacts river ecosystems, yet 
 - **CLEAR-TP Database**: The database will be publicly available after the publication.
 - **Coverage**: The database spans **33,497 river reaches** (a total of **107,000 km in length**) from **1984 to 2018**.
 - **Approach**: Combines **remote sensing** technologies with **machine learning** algorithms for TP estimation.
+- **Remote Sensing Data**:  https://doi.org/10.1029/2020GL088946
+- **ML Model**:  https://doi.org/10.1029/2024JG008121
 
 
