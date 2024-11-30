@@ -1,0 +1,415 @@
+#Install Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+
+#Data
+```{r}
+Remote_Data <- read_feather("C:\\Research\\TP Analysis\\Data\\Remote Data\\CLEAR-TP.feather") #33497
+NHD_Shape <- st_read("C:\\Research\\TP Analysis\\Shape File\\NHDShapeFile\\nhdplusv2_modified_v1.0.shp")
+```
+
+#Directory for dam data
+```{r}
+Dam_NID <- read.csv("C:\\Research\\TP Analysis\\Data\\Dam Data\\NHD_100_NID.csv") # Dams 
+```
+
+#Averaging the remote TP data (Annual TP)
+```{r}
+Remote_Data <- Remote_Data%>%mutate(Date= as.Date(Date))%>%mutate(Year = year(Date), Month = month(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))
+
+Remote_Data <- Remote_Data%>%mutate(ID_Year = paste(ID, Year, sep = "_"))
+
+#By Season
+Remote_Season_ID <- Remote_Data %>%
+  group_by(ID, Year) %>%
+  summarise(Season_Count = n_distinct(Season)) %>%
+  filter(Season_Count > 3) %>%
+  mutate(ID_Year = paste(ID, Year, sep = "_")) # Criteria to consider year will all seasons
+
+Remote_Filtered_Data <- Remote_Data %>%
+  filter(ID_Year %in% Remote_Season_ID$ID_Year)
+
+#Averaging
+Remote_Data_Average <- Remote_Filtered_Data%>%group_by(ID, Year, Season)%>%summarise(TP_Season = mean(Estimated))
+Remote_Data_Average_Year <- Remote_Data_Average%>%group_by(ID, Year)%>%summarise(TP = mean(TP_Season))
+
+Remote_Data_Average_Year <- Remote_Data_Average_Year%>%filter(Year <2019)
+```
+
+#Find the location of dams
+```{r}
+Dam_NID <- Dam_NID%>%mutate(YEAR = Year.Completed, DAM_HGT_M = Dam.Height..feet.* 0.3048, GRAND_ID = River.or.Stream )
+Dam_NID <- Dam_NID%>%select(c("GRAND_ID", "ID", "YEAR", "DAM_HGT_M", "Primary.Purpose"))
+
+Dam <- rbind(Dam_NID)
+Dam <- Dam%>%group_by(ID)%>%summarise(YEAR = max(YEAR), DAM_HGT_M = mean(DAM_HGT_M))
+Dam <- Dam%>%filter(DAM_HGT_M >30.5)
+```
+
+#Join the Dam with the river network to defind the upstream and the downstream reach
+```{r}
+Dam_NHD <- Dam %>%
+  left_join(NHD_Shape, by = "ID") %>%
+  mutate_all(~ ifelse(is.na(.), 0, .))%>%as.data.frame()
+
+Dam_name <- unique(Dam$ID)
+```
+
+#Compare the TP between the reaches
+```{r}
+Dam_change <- data.frame()
+result<- data.frame()
+Dam_name <- unique(Dam$ID)
+
+for (j in Dam_name){
+
+      Dam_specific <- j
+      
+      print(Dam_specific)
+      
+      Dam_NHD_GNIS <- Dam_NHD %>%
+              filter(ID == Dam_specific) %>%
+              pull(GNIS_ID)
+      
+          
+          # Get the construction year as an integer
+      Cons_year <- Dam %>%
+              filter(ID == Dam_specific) %>%
+              select(YEAR) %>%
+              pull(YEAR)%>%max()
+          
+      Dam_height <- Dam%>%filter(ID == Dam_specific)%>%select(DAM_HGT_M)%>%pull(DAM_HGT_M)
+          
+      # Filter remote data for years greater than 5 years after the construction year
+      Remote_averaged_filtered <- Remote_Data_Average_Year %>%
+              filter(Year > Cons_year)
+          
+      Dam_NHD_GNIS <- Dam_NHD %>%
+              filter(ID == Dam_specific) %>%
+              pull(GNIS_ID)
+      
+      Upstream_reach_ID_1 <- NHD_Shape %>%
+        filter(toID == Dam_specific & GNIS_ID == Dam_NHD_GNIS) %>%
+        pull(ID)
+      
+      # Check if the first upstream reach ID exists
+      if (length(Upstream_reach_ID_1) == 0 || Upstream_reach_ID_1 == 0) {
+        Upstream_reach_ID_2 <- 0
+        Upstream_reach_ID_3 <- 0
+      } else {
+        # Get the second upstream reach ID
+        Upstream_reach_ID_2 <- NHD_Shape %>%
+          filter(toID == Upstream_reach_ID_1 & GNIS_ID == Dam_NHD_GNIS) %>%
+          pull(ID)
+        
+        # Check if the second upstream reach ID exists
+        if (length(Upstream_reach_ID_2) == 0 || Upstream_reach_ID_2 == 0) {
+          Upstream_reach_ID_3 <- 0
+        } else {
+          # Get the third upstream reach ID
+          Upstream_reach_ID_3 <- NHD_Shape %>%
+            filter(toID == Upstream_reach_ID_2 & GNIS_ID == Dam_NHD_GNIS) %>%
+            pull(ID)
+        }
+      }
+      
+      # Create a list of the upstream reach IDs
+      upstream_ids <- list(Upstream_reach_ID_1, Upstream_reach_ID_2, Upstream_reach_ID_3)
+      
+      if (all(unlist(upstream_ids) == 0)) {
+        print("All values in upstream_ids are 0. Breaking the loop!")
+        next
+      }
+      
+      # Initialize a list to store the filtered dataframes
+      upstream_years <- list()
+      
+      # Loop over each Upstream reach ID
+      for (i in 1:3) {
+        # Get the current upstream reach ID
+        reach_id <- upstream_ids[[i]]
+        
+        # Check if the reach ID is 0, then replace with NA
+        if (is_empty(reach_id) || is.na(reach_id) || reach_id == "") {
+          # Replace with NA if reach ID is 0
+          upstream_years[[i]] <- Remote_averaged_filtered[0, ] %>%
+            rename(!!paste0("TP_", i, "_Up") := TP)  # Dynamically name the TP column
+        } else {
+          # Otherwise, filter and rename
+          upstream_years[[i]] <- Remote_averaged_filtered %>%
+            filter(ID == reach_id) %>%
+            rename(!!paste0("TP_", i, "_Up") := TP)  # Dynamically name the TP column
+        }
+      }
+      
+      # Assign each upstream year dataframe to the appropriate variable
+      Upstream_year_1 <- upstream_years[[1]]
+      Upstream_year_2 <- upstream_years[[2]]
+      Upstream_year_3 <- upstream_years[[3]]
+      
+      #_____________________________________________________________________________   
+      
+      Dam_year <- Remote_averaged_filtered %>% filter(ID == Dam_specific)
+        # Check if Dam_year is empty
+      if (nrow(Dam_year) == 0) {
+        print("Dam_year is empty. Breaking the loop!")
+        next
+      }  
+      #_____________________________________________________________________________
+      # Downstream
+      Downstream_reach_ID_1 <- NHD_Shape %>%
+        filter(ID == Dam_specific & GNIS_ID == Dam_NHD_GNIS) %>%
+        pull(toID)
+      
+      # Check if the first downstream reach ID exists
+      if (length(Downstream_reach_ID_1) == 0 || Downstream_reach_ID_1 == 0) {
+        Downstream_reach_ID_2 <- 0
+        Downstream_reach_ID_3 <- 0
+      } else {
+        # Get the second downstream reach ID
+        Downstream_reach_ID_2 <- NHD_Shape %>%
+          filter(ID == Downstream_reach_ID_1 & GNIS_ID == Dam_NHD_GNIS) %>%
+          pull(toID)
+        
+        # Check if the second downstream reach ID exists
+        if (length(Downstream_reach_ID_2) == 0) {
+          Downstream_reach_ID_3 <- 0
+        } else {
+          # Get the third downstream reach ID
+          Downstream_reach_ID_3 <- NHD_Shape %>%
+            filter(ID == Downstream_reach_ID_2 & GNIS_ID == Dam_NHD_GNIS) %>%
+            pull(toID)
+        }
+      }
+      
+      # Create a list of the downstream reach IDs
+      downstream_ids <- list(Downstream_reach_ID_1, Downstream_reach_ID_2, Downstream_reach_ID_3)
+      
+        if (all(unlist(downstream_ids) == 0)) {
+          print("All values in downstream_ids are 0. Breaking the loop!")
+          next
+      }
+      # Initialize a list to store the filtered dataframes
+      downstream_years <- list()
+      
+      # Loop over each Downstream reach ID
+      for (i in 1:3) {
+        # Get the current downstream reach ID
+        reach_id <- downstream_ids[[i]]
+        
+        # If the reach ID is NA, empty, or invalid, create an empty dataframe with the renamed column
+        if (is_empty(reach_id) || is.na(reach_id) || reach_id == "") {
+          downstream_years[[i]] <- Remote_averaged_filtered[0, ] %>%
+            rename(!!paste0("TP_", i, "_Down") := TP)  # Dynamically name the TP column
+        } else {
+          # Otherwise, filter and rename
+          downstream_years[[i]] <- Remote_averaged_filtered %>%
+            filter(ID == reach_id) %>%
+            rename(!!paste0("TP_", i, "_Down") := TP)  # Dynamically name the TP column
+        }
+      }
+      
+      # Assign each downstream year dataframe to the appropriate variable
+      Downstream_year_1 <- downstream_years[[1]]
+      Downstream_year_2 <- downstream_years[[2]]
+      Downstream_year_3 <- downstream_years[[3]]
+      
+      #_____________________________________________________________________________
+      # Join the upstream data by 'Year'
+      Upstream_data <- Upstream_year_1 %>%
+        left_join(Upstream_year_2, by = "Year") %>%
+        left_join(Upstream_year_3, by = "Year") %>%
+        select(Year, TP_1_Up, TP_2_Up, TP_3_Up)
+      
+      Downstream_data <- Downstream_year_1 %>%
+        left_join(Downstream_year_2, by = "Year") %>%
+        left_join(Downstream_year_3, by = "Year") %>%
+        select(Year, TP_1_Down, TP_2_Down, TP_3_Down)
+      
+      Final_data <- Dam_year %>%
+        left_join(Upstream_data, by = "Year") %>%
+        left_join(Downstream_data, by = "Year")
+      
+      Dam_result <- Final_data %>%
+        select(Year, TP_1_Up, TP_2_Up, TP_3_Up, TP, TP_1_Down, TP_2_Down, TP_3_Down)
+      
+      ordered_TP_Type <- c('TP_3_Up', 'TP_2_Up', 'TP_1_Up', 'TP', 'TP_1_Down', 'TP_2_Down', 'TP_3_Down')
+      
+      medians <- apply(Dam_result, 2, median, na.rm = TRUE)
+      
+      # Convert the result into a single-row DataFrame
+      medians_df <- as.data.frame(t(medians))
+      
+      medians_df <- medians_df%>%mutate("Dam_height" = Dam_height, "Count" = nrow(Dam_result))
+      
+      # Assign names to the last two columns
+      colnames(medians_df)[(ncol(medians_df)-1):ncol(medians_df)] <- c("Dam_height", "Count") 
+      
+      # Set column names to match the original dataset
+      colnames(medians_df) <- colnames(Dam_result)
+      
+      result <- rbind(result, medians_df)
+
+      
+}
+```
+#Dam TP change
+```{r}
+# Assign names to the last two columns
+colnames(result)[(ncol(result)-1):ncol(result)] <- c("Dam_height", "Count") 
+
+ordered_TP_Type <- c('TP_3_Up', 'TP_2_Up', 'TP_1_Up', 'TP', 'TP_1_Down', 'TP_2_Down', 'TP_3_Down')
+
+# Filter the data based on dam height and number of yearly observations
+result_filtered <- result%>%filter(Dam_height > 30.5, Count>= 15)
+
+result_filtered$Upstream <- rowMeans(result_filtered[, c("TP_1_Up", "TP_2_Up", "TP_3_Up")], na.rm = TRUE)
+result_filtered$Downstream <- result_filtered$TP
+
+# Calculate the average for each column reach
+result_filtered_average <- apply(result_filtered, 2, mean, na.rm = TRUE)
+
+result_filtered_average 
+
+# Extract the average values for upstream columns and calculate their mean
+Upstream_TP <- mean(
+  c(
+    result_filtered_average["TP_1_Up"], 
+    result_filtered_average["TP_2_Up"], 
+    result_filtered_average["TP_3_Up"]
+  ), 
+  na.rm = TRUE
+)
+
+# Extract the average value for the downstream column
+Downstream_TP <- result_filtered_average["TP"]
+
+# Calculate percent change
+Percent_change <- ((Upstream_TP - Downstream_TP) / Downstream_TP) * 100
+
+# Print the result
+print(paste("Overall Percent change was:", Percent_change))
+```
+# Wilcoxin Test
+```{r}
+# Perform the Wilcoxon test
+wilcox_test <- wilcox.test(result_filtered$Upstream, result_filtered$Downstream, paired = TRUE)
+
+# Check if the result is significant and print the appropriate message
+if (wilcox_test$p.value < 0.05) {
+  print("Downstream and Upstream reaches are statistically different.")
+} else {
+  print("No statistically significant difference between downstream and upstream reaches.")
+}
+
+```
+
+# Considering only instances where the downstream TP was less than the upstream TP
+```{r}
+# Filter rows where TP_1_Up > TP
+result_filtered_positive <- result_filtered %>%
+  filter(TP_1_Up > TP)
+
+# Calculate the average for each column and store it as a named vector
+result_filtered_positive_average <- colMeans(result_filtered_positive, na.rm = TRUE)
+
+# Extract the average values for upstream columns and calculate their mean
+Upstream_TP <- median(
+  c(
+    result_filtered_positive_average["TP_1_Up"], 
+    result_filtered_positive_average["TP_2_Up"], 
+    result_filtered_positive_average["TP_3_Up"]
+  ), 
+  na.rm = TRUE
+)
+
+# Extract the average value for the downstream column
+Downstream_TP <- result_filtered_positive_average["TP"]
+
+# Calculate percent change
+Percent_change <- ((Upstream_TP - Downstream_TP) / Downstream_TP) * 100
+
+# Print the result
+print(paste("Percent change in the positive was:", Percent_change))
+```
+
+# Considering only instances where the downstream TP was more than the upstream TP
+```{r}
+# Filter rows where TP_1_Up > TP
+result_filtered_negative <- result_filtered %>%
+  filter(TP_1_Up < TP)
+
+# Calculate the average for each column and store it as a named vector
+result_filtered_negative_average <- colMeans(result_filtered_negative, na.rm = TRUE)
+
+# Extract the average values for upstream columns and calculate their mean
+Upstream_TP <- median(
+  c(
+    result_filtered_negative_average["TP_1_Up"], 
+    result_filtered_negative_average["TP_2_Up"], 
+    result_filtered_negative_average["TP_3_Up"]
+  ), 
+  na.rm = TRUE
+)
+
+# Extract the average value for the downstream column
+Downstream_TP <-result_filtered_negative_average["TP"]
+
+# Calculate percent change
+Percent_change <- ((Upstream_TP - Downstream_TP) / Downstream_TP) * 100
+
+# Print the result
+print(paste("Percent change in the positive was:", Percent_change))
+```
+#Make the plot
+```{r}
+Percent_change <- result_filtered
+
+# Calculate the mean of upstream columns for each row
+Percent_change$Upstream <- rowMeans(
+  cbind(Percent_change$TP_1_Up, Percent_change$TP_2_Up, Percent_change$TP_3_Up),
+  na.rm = TRUE
+)
+
+# Downstream column is directly assigned
+Percent_change$Downstream <- Percent_change$TP
+
+# Calculate percent change for each row
+Percent_change$Change <- ((Percent_change$Upstream - Percent_change$Downstream) / 
+                          Percent_change$Downstream) * 100
+
+
+Dam_plot <- ggplot(Percent_change, aes(x = Change, fill = Change > 0)) +
+  geom_histogram(alpha = 0.8, , position = "identity") +  # Histogram with transparency and 30 bins
+  scale_fill_manual(values = c("lightcoral", "lightblue"),  # Color for negative and positive
+                    name = "Change Direction", 
+                    labels = c("Negative", "Positive")) +  # Label the legend
+  labs(title = "Dam", x = "Change (%)", y = "Count") +  # Adjust labels
+  theme_minimal() +  # Use a clean minimal theme
+  scale_y_continuous(expand = c(0, 0)) +  # Adjust y-axis scaling
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16),  # Center and size the title
+    axis.title = element_text(size = 14),  # Increase axis title size
+    axis.text = element_text(size = 14),  # Increase axis text size
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.line = element_line(size = 1),  # Increase axis line thickness
+    legend.title = element_text(size = 14),  # Increase legend title size
+    legend.text = element_text(size = 14),
+    panel.border = element_rect(color = "black", fill = NA, size = 1)  # Add a box around the plot
+  )+ylim(0,25)+xlim(-100, 150) # Adjust x-axis limits
+
+
+Dam_plot
+ggsave("C:\\Research\\TP Analysis\\Figures\\Supporting Figures\\Dam.png", plot = Dam_plot , width = 10, height = 8, units = "in", dpi = 1000)
+```
+
+
+
+

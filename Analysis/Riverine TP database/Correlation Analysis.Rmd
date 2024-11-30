@@ -1,0 +1,167 @@
+#Extract Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+#Data
+```{r}
+Remote_Data <- read_feather("C:\\Research\\TP Analysis\\Data\\Remote Data\\CLEAR-TP.feather") #33497
+NHD_Shape <- st_read("C:\\Research\\TP Analysis\\Shape File\\NHDShapeFile\\nhdplusv2_modified_v1.0.shp")
+
+Joined <- read.csv("C:\\Research\\TP Analysis\\Analysis\\Riverine TP database\\Reach_Gauge\\Remote_Gauge_Comb_ID.csv") # Reach and Gauge Location are spatially joined
+gauge_filtered <- read.csv("C:\\Research\\TP Analysis\\Data\\Gauge Data\\gauge.data.csv")
+```
+#Evaluation
+```{r}
+Remote_Data <- Remote_Data%>%mutate(date= as.Date(Date))%>%mutate(Year = year(Date), Month = month(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))
+
+Remote_Data <- Remote_Data%>%mutate(ID_Year = paste(ID, Year, sep = "_"))
+Remote_Data <- Remote_Data%>%filter(Year < 2019)
+#By Season 
+
+Remote_Season_ID <- Remote_Data %>%
+  group_by(ID, Year) %>%
+  summarise(Season_Count = n_distinct(Season)) %>%
+  filter(Season_Count > 3) %>%
+  mutate(ID_Year = paste(ID, Year, sep = "_")) # Criteria to consider year will all seasons
+
+Remote_Filtered_Data <- Remote_Data %>%
+  filter(ID_Year %in% Remote_Season_ID$ID_Year)
+
+#Averaging 
+
+Remote_Data_Average <- Remote_Filtered_Data%>%group_by(ID, Year, Season)%>%summarise(TP_Season = mean(Estimated)) # Check all season every year
+Remote_Data_S <- Remote_Data_Average%>%group_by(ID, Year)%>%summarise(TP = mean(TP_Season))
+```
+
+#Gauge Data 
+```{r}
+Gauge_data <- gauge_filtered%>%filter(ResultMeasureValue <1)
+
+Gauge_data <- Gauge_data%>%select(MonitoringLocationIdentifier, ActivityStartDate ,ResultMeasureValue)%>%
+  mutate(Date = ymd(ActivityStartDate),
+         Year = year(Date),
+         Month = month(Date),
+         Week = week(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))%>%filter(Year<2019)
+
+Gauge_data <- Gauge_data%>%mutate(ID_Year = paste(MonitoringLocationIdentifier, Year, sep = "_"))
+
+Gauge_Season_ID <- Gauge_data %>%
+  group_by(MonitoringLocationIdentifier, Year) %>%
+  summarise(Season_Count = n_distinct(Season)) %>%
+  filter(Season_Count > 3) %>%
+  mutate(ID_Year = paste(MonitoringLocationIdentifier, Year, sep = "_")) # Criteria to consider year will all seasons
+
+Gauge_Filtered_Data <- Gauge_data %>%
+  filter(ID_Year %in% Gauge_Season_ID$ID_Year)
+
+Gauge_Data_Average <- Gauge_Filtered_Data%>%group_by(MonitoringLocationIdentifier, Year, Season)%>%summarise(TP_Season = mean(ResultMeasureValue)) # Check all season every year
+
+Gauge_Data_S <- Gauge_Data_Average%>%group_by(MonitoringLocationIdentifier, Year)%>%summarise(TP = mean(TP_Season))
+
+```
+#Compare
+```{r}
+Trend_all <- data.frame()
+
+Remote_Data_S_f <- Remote_Data_S%>%filter(ID%in%Joined$ID) 
+Gauge_Data_S_f  <- Gauge_Data_S%>%filter(MonitoringLocationIdentifier%in%Joined$MonitoringLocationIdentifier)
+
+R <-unique(Remote_Data_S_f$ID)
+G <- unique(Gauge_Data_S_f$MonitoringLocationIdentifier)
+
+Trend_all <- data.frame()  # Initialize an empty data frame to store results
+
+j  <- 1
+
+for (i in 1:length(G)) {
+  
+  print(paste("ID_Checking:", i))
+  G_ID <- G[i]
+  R_ID <- Joined %>%
+    filter(MonitoringLocationIdentifier == G_ID) %>%
+    select(ID)%>%
+  slice(1) %>%
+  pull(1) 
+  
+  G_Filtered <- Gauge_Data_S_f %>%
+    filter(MonitoringLocationIdentifier == G_ID)
+  R_Filtered <- Remote_Data_S_f %>%
+    filter(ID == R_ID)
+  
+  G_Year <- G_Filtered$Year %>% as.array()
+  R_Year <- R_Filtered$Year %>% as.array()
+  
+  Overlap_years <- intersect(G_Year, R_Year)
+  
+  # If the count of Overlap_years is less than 3, skip this iteration
+  if (length(Overlap_years) < 3) {
+    next
+  }
+  
+  G_Filtered <- G_Filtered %>%
+    filter(Year %in% Overlap_years)
+  R_Filtered <- R_Filtered %>%
+    filter(Year %in% Overlap_years)
+  
+  # Mann Kendall Test
+  G_result_two_sided <- mk.test(G_Filtered$TP, alternative = "two.sided")
+  G_pvalue <- G_result_two_sided$p.value
+  G_tau <- as.data.frame(G_result_two_sided$estimates)$`G_result_two_sided$estimates`[3]
+  
+  R_result_two_sided <- mk.test(R_Filtered$TP, alternative = "two.sided")
+  R_pvalue <- R_result_two_sided$p.value
+  R_tau <- as.data.frame(R_result_two_sided$estimates)$`R_result_two_sided$estimates`[3]
+  
+  Corr <- cor(G_Filtered$TP, R_Filtered$TP)
+  
+  Trend_value <- data.frame(G_ID = G_ID, 
+                            R_ID = R_ID, 
+                            Gauge_pvalue = G_pvalue, 
+                            Remote_pvalue = R_pvalue,  
+                            Gauge_TAU = G_tau,
+                            Remote_TAU = R_tau) %>%
+    mutate(Gauge_Trend_Type = ifelse(G_tau < 0, "Decreasing", "Increasing"),
+           Remote_Trend_Type = ifelse(R_tau < 0, "Decreasing", "Increasing"), Year = length(Overlap_years), Correlation = Corr  )
+  
+  Trend_all <- rbind(Trend_all, Trend_value)
+  j = j+1
+  print(j)
+  
+}
+
+Trend_all$result <- ifelse(Trend_all$Gauge_Trend_Type == Trend_all$Remote_Trend_Type, "Same", "Different")
+Trend_all_p <- Trend_all%>%filter(Gauge_pvalue < 0.05 & Remote_pvalue < 0.05)
+
+Trend_all_Sig <- Trend_all%>%filter(Gauge_pvalue < 0.05)
+table(Trend_all$result)
+table(Trend_all_p$result)
+
+Trend_all <- arrange(Trend_all, desc(Correlation))
+```
+```{r}
+Trend_all <- Trend_all%>%filter(Year >=15)
+#write.csv(Trend_all, "C:\\Research\\TP Analysis\\Cache\\Temporal Change\\Reach_Level_Trend_Original_All.csv")
+
+
+mean(Trend_all$Correlation)
+median(Trend_all$Correlation)
+Trend_all_Positive <- Trend_all%>%filter(Correlation >0)
+Trend_all_Negative <- Trend_all%>%filter(Correlation<0)
+
+```
+
+
+
+
+
+

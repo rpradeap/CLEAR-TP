@@ -1,0 +1,57 @@
+#Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+#Data
+```{r}
+Remote_Data <- read_feather("C:\\Research\\TP Analysis\\Data\\Remote Data\\CLEAR-TP.feather") #33497
+NHD_Shape <- st_read("C:\\Research\\TP Analysis\\Shape File\\NHDShapeFile\\nhdplusv2_modified_v1.0.shp")
+```
+#Analysis
+```{r}
+Remote_Data <- Remote_Data%>%inner_join(NHD_Shape, by = "ID")
+
+Remote_Data <- Remote_Data%>%mutate(date= as.Date(Date))%>%mutate(Year = year(Date), Month = month(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))
+
+Remote_Data <- Remote_Data%>%filter(Year < 2019)
+```
+#Stats
+```{r}
+#TP with data
+length(unique(Remote_Data$GNIS_ID))
+unique_IDs <- unique(Remote_Data$GNIS_ID)
+
+#Total length of river
+NHD_Shape_Filtered <- NHD_Shape%>%filter(GNIS_ID%in%unique_IDs)
+sum(NHD_Shape_Filtered$LENGTHKM_)
+
+#Median reach count in a river
+River_reach <- NHD_Shape_Filtered%>%group_by(GNIS_ID)%>%summarise(Reach_count = median(n_distinct(ID)))
+median(River_reach$Reach_count)
+
+#Range of TP
+range(Remote_Data$Estimated)
+
+#Year measurement per river
+River_year <- Remote_Data%>%group_by(GNIS_ID, Year)%>%summarise(Count = n())
+median(River_year$Count)
+mean(River_year$Count)
+
+#Year measurement per reach
+River_reach_year <- Remote_Data%>%group_by(ID, Year)%>%summarise(Count = n())
+median(River_reach_year$Count)
+mean(River_reach_year$Count)
+
+#Number of year 
+Reach_time <- Remote_Data%>%group_by(ID)%>%summarise(Count = n_distinct(Year))
+Reach_time <- Reach_time%>%filter(Count >=30)
+
+```
+
+
+

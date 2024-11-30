@@ -1,0 +1,203 @@
+#Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+#Data
+```{r}
+Remote_Data <- read_feather("C:\\Research\\TP Analysis\\Data\\Remote Data\\CLEAR-TP.feather") #33497
+NHD_Shape <- st_read("C:\\Research\\TP Analysis\\Shape File\\NHDShapeFile\\nhdplusv2_modified_v1.0.shp")
+```
+#Evaluation
+```{r}
+Data <- Remote_Data%>%mutate(date= as.Date(Date))%>%mutate(Year = year(Date), Month = month(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))
+
+Data <- Data%>%filter(Year < 2019)
+
+Data <- Data%>%mutate(ID_Year = paste(ID, Year, sep = "_"))
+```
+#By Season 
+```{r}
+Season_ID <- Data %>%
+  group_by(ID, Year) %>%
+  summarise(Season_Count = n_distinct(Season)) %>%
+  filter(Season_Count >= 3) %>%
+  mutate(ID_Year = paste(ID, Year, sep = "_")) # Criteria to consider year will all seasons
+
+Filtered_Data <- Data %>%
+  filter(ID_Year %in% Season_ID$ID_Year)
+```
+#Averaging 
+```{r}
+Data_Average_Season <- Filtered_Data%>%group_by(ID, Year, Season)%>%summarise(TP_Season = mean(Estimated)) # Check all season every year
+Data_Year <- Data_Average_Season%>%group_by(ID, Year)%>%summarise(TP = mean(TP_Season))
+```
+
+
+# Trend Analysis
+```{r}
+Year_ID <- Data_Year %>%
+  group_by(ID) %>%
+  summarise(Year_Count = n_distinct(Year)) %>%
+  filter(Year_Count >= 15) # Criteria (more than 15 years of annual TP)
+
+Data_S_Y <- Data_Year %>%
+  filter(ID %in% Year_ID$ID)
+
+IDS <- unique(Data_S_Y$ID)
+
+Reach_Trend <- data.frame()
+
+cl <- makePSOCKcluster(detectCores() - 2)
+registerDoParallel(cl)
+
+j = 1
+
+for (i in IDS) {
+
+  Data_filter <- Data_S_Y %>% filter(ID == i)
+  
+  Years <- Data_filter %>%
+      group_by(ID) %>%
+      summarise(Year_Number = n_distinct(Year)) %>%
+      pull(Year_Number)
+
+  # Mann Kendall Test
+  result_two_sided <- mk.test(Data_filter$TP, alternative = "two.sided")
+  pvalue <- result_two_sided$p.value
+  tau <- as.data.frame(result_two_sided$estimates)$`result_two_sided$estimates`[3]
+  
+  # Theil Sen Estimator
+  theil_sen_result <- mblm(TP ~ Year, data = Data_filter)
+  rate <- as.numeric(theil_sen_result$coefficients[2])
+  rate_avg <- (rate / mean(Data_filter$TP))*100
+  
+  ID_Trend_value <- data.frame(ID = i, p = pvalue, TAU_Value = tau, Rate = rate, RatePercent = rate_avg, Num_Years = Years) %>%
+    mutate(Trend_Type = ifelse(tau < 0, "Decreasing", "Increasing"))
+  
+  Reach_Trend <- rbind(Reach_Trend, ID_Trend_value)
+  
+  print(j)
+  
+  j = j+1
+  
+}
+
+stopCluster(cl)
+write.csv(Reach_Trend,"C:\\Research\\TP Analysis\\Cache\\Temporal Change\\Reach_Level_Trend_Original_All.csv")
+```
+#Analysis
+```{r}
+Reach_Trend <- read.csv("C:\\Research\\TP Analysis\\Cache\\Temporal Change\\Reach_Level_Trend_Original_All_Save.csv")
+
+Reach_Trend <- Reach_Trend %>%
+  mutate(Trend = if_else(p < 0.05, "Significant", "Non-Significant"))
+
+Reach_Trend <- Reach_Trend%>%filter(Trend == "Significant")
+
+Reach_Trend <- Reach_Trend%>%filter(Num_Years >=15)
+
+Reach_Year <-Reach_Trend%>%group_by(Trend)%>%summarise(Year_Count = median(Num_Years)) 
+
+mean(Reach_Trend$Rate)
+median(Reach_Trend$Rate)
+
+mean(Reach_Trend$RatePercent)
+median(Reach_Trend$RatePercent)
+
+Reach_Trend_Dec <- Reach_Trend%>%filter(Trend_Type =="Decreasing")
+Reach_Trend_Inc <- Reach_Trend%>%filter(Trend_Type =="Increasing")
+
+median(Reach_Trend_Dec$RatePercent)
+median(Reach_Trend_Inc$RatePercent)
+```
+#Plot
+```{r}
+NHD_data_TP_change <- NHD_Shape%>%inner_join(Reach_Trend, by = "ID")
+
+# Set the CRS
+crs <- st_crs(2163)
+
+# Get the map data for the US
+us <- ne_countries(scale = "medium", country = "United States of America", returnclass = "sf")
+
+# Transform to the desired CRS
+us_transformed <- st_transform(us, crs)
+
+              # Define a color palette
+          color_palette_1 <- colorRampPalette(c("orange", "red"))
+          
+          # Generate a vector of colors
+          color_scale_positive <- color_palette_1(100)
+          
+          
+                      # Define a color palette
+          color_palette_2 <- colorRampPalette(c("green", "orange"))
+          
+          # Generate a vector of colors
+          color_scale_negative <- color_palette_2(100)
+          
+          NHD_data_TP_change_2 <- NHD_data_TP_change
+
+usaplotTP_change <- ggplot() + 
+  geom_sf(data = us_transformed, fill = "grey0",  color="grey0", lwd= 1) +
+  geom_sf(data = NHD_Shape, color = "grey30", linewidth = NHD_Shape$StrmOrd/5) +
+  #geom_sf(data = NHD_Shape_TP, aes(color = TP), linewidth = NHD_Shape_TP$StrmOrd/5) +
+  geom_sf(data = NHD_data_TP_change_2 %>% filter(p < 0.05), aes(color = RatePercent), linewidth = NHD_data_TP_change_2$StrmOrd/5) +
+  coord_sf(crs = st_crs(2163), xlim = c(-2500000, 2500000), ylim = c(-2300000, 730000))+
+  scale_color_gradientn(colors = c(color_scale_negative, color_scale_positive), limits = c(-4, 4)) +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(size = 20),  
+        panel.background = element_rect(fill = "white"),  # Set background to white
+        axis.title.x = element_blank(),  # Remove x-axis label
+        axis.title.y = element_blank(),  # Remove y-axis label
+        axis.text.x = element_blank(),   # Remove x-axis tick labels
+        axis.text.y = element_blank(),   # Remove y-axis tick labels
+        axis.ticks = element_blank(),    # Remove ticks from both axes
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 15),  # Adjust legend label size
+        legend.key.size = unit(2.5, "lines")) +  # Move legend to coordinates (0.5, 0.9)
+  labs(title = sprintf("c)"), color = "Percent Change (%/year)")
+
+hist_TP <- ggplot(NHD_data_TP_change_2, aes(x = RatePercent)) +
+  geom_histogram(color = "black", fill = "lightblue", size = 1, bins = 10) +  # Change size for line thickness
+  labs(x = "Percent Change", y = "Frequency") +  # Change x and y axis names
+  theme(
+    axis.text = element_text(size = 12),  # Adjust font size for axis text
+    axis.title = element_text(size = 15),  # Adjust font size for axis titles
+    plot.title = element_text(size = 15),  # Adjust font size for title
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),   # Remove minor grid lines
+    axis.text.x = element_text(angle = 0, hjust = 1),  # Rotate x-axis labels vertically
+    panel.background = element_blank(), 
+    plot.background = element_blank()) +  
+  scale_x_continuous(breaks = seq(-4, 4, by = 2), labels = seq(-4, 4, by = 2), limits = c(-4, 4), expand = c(0, 0)) +  # Set x-axis limits, breaks, and remove padding
+  scale_y_continuous(breaks = seq(0, 1000, by = 500), labels = seq(0, 1000, by = 500), limits = c(0, 1000), expand = c(0, 0))  # Set y-axis breaks and labels 
+
+
+
+# Combine the plots with annotation_custom
+trend_usaplot_with_hist <- usaplotTP_change  +
+  annotation_custom(
+    grob = ggplotGrob(hist_TP),
+    xmin = -2800000, xmax = -1000000,  # Adjust these values for positioning
+    ymin = -2500000, ymax = -1000000     # Adjust these values for positioning
+  ) +
+  theme(panel.background = element_rect(fill = "transparent"))  # Set background to transparent
+
+ggsave("C:\\Research\\TP Analysis\\Figures\\Figure 1\\Trend_TP.png", plot = trend_usaplot_with_hist , width = 10, height = 8, units = "in", dpi = 1000)
+```
+
+
+
+
+
+
+
+
+
+

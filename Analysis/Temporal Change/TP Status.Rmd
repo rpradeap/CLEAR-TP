@@ -1,0 +1,116 @@
+#Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+#Data
+```{r}
+Remote_Data <- read_feather("C:\\Research\\TP Analysis\\Data\\Remote Data\\CLEAR-TP.feather") #33497
+NHD_Shape <- st_read("C:\\Research\\TP Analysis\\Shape File\\NHDShapeFile\\nhdplusv2_modified_v1.0.shp")
+```
+#Remote Data
+```{r}
+Remote_Data <- Remote_Data%>%mutate(date= as.Date(Date))%>%mutate(Year = year(Date), Month = month(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))
+
+Remote_Data <- Remote_Data%>%filter(Year >2014 & Year < 2019) #2019 data is incomplete
+Remote_Data_season <- Remote_Data%>%group_by(ID, Year, Season)%>%summarise(TP = mean(Estimated))%>%mutate(ID_filter = paste0(ID, "_", Year))
+
+Remote_Groups <- Remote_Data%>%group_by(ID, Year)%>%summarise(Count = n_distinct(Season))%>%filter(Count >2)%>%mutate(ID_filter= paste0(ID, "_", Year))
+```
+#Summarize TP 
+```{r}
+# Convert Remote_Data_season to data.table
+setDT(Remote_Data_season)
+
+# Convert Remote_Groups to data.table
+setDT(Remote_Groups)
+
+# Filter Remote_Data_season based on ID_filter in Remote_Groups
+Remote_Data_season <- Remote_Data_season[Remote_Groups, on = "ID_filter"]
+
+Remote_Avergae <- Remote_Data_season%>%group_by(ID)%>%summarise(TP = mean(TP))
+```
+
+```{r}
+Average_value <- mean(Remote_Avergae$TP)
+Median_value <- median(Remote_Avergae$TP)
+Max_value <- max(Remote_Avergae$TP)
+Min_value <- min(Remote_Avergae$TP)
+```
+
+#Join the TP values with the River Shape file
+```{r}
+NHD_Shape_TP <- left_join(NHD_Shape, Remote_Avergae, by = "ID")
+```
+#Plot
+```{r}
+# Set the CRS
+crs <- st_crs(2163)
+
+# Get the map data for the US
+us <- ne_countries(scale = "medium", country = "United States of America", returnclass = "sf")
+
+# Transform to the desired CRS
+us_transformed <- st_transform(us, crs)
+
+# Calculate breaks for skewed distribution
+breaks <- c(0.01,0.25, 0.5, 0.6)
+
+# Define labels for breaks
+labels <- c("0.01", "0.25", "0.5", "1")
+```
+# Plot
+```{r}
+usaplotTP <- ggplot() + 
+  geom_sf(data = us_transformed, fill = "grey0", color = "grey0", lwd = 0.8) +
+  geom_sf(data = NHD_Shape, color = "grey30", linewidth = NHD_Shape$StrmOrd/4) +
+  geom_sf(data = NHD_Shape_TP, aes(color = TP), linewidth = NHD_Shape_TP$StrmOrd/4) +
+  scale_color_viridis(breaks = breaks, labels = labels) +  # Setting breaks and labels
+  coord_sf(crs = st_crs(2163), xlim = c(-2500000, 2500000), ylim = c(-2300000, 730000)) +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(size = 20),  
+        panel.background = element_rect(fill = "white"),  # Set background to white
+        axis.title.x = element_blank(),  # Remove x-axis label
+        axis.title.y = element_blank(),  # Remove y-axis label
+        axis.text.x = element_blank(),   # Remove x-axis tick labels
+        axis.text.y = element_blank(),   # Remove y-axis tick labels
+        axis.ticks = element_blank(),    # Remove ticks from both axes
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 15),  # Adjust legend label size
+        legend.key.size = unit(2.5, "lines")) +
+  labs(title = "b)", color = "TP Concentration (mg/L)")
+
+# Create the histogram as a ggplot object
+hist_TP <- ggplot(NHD_Shape_TP, aes(x = TP)) +
+  geom_histogram(color = "black", fill = "lightblue", size = 1, bins = 10) +  # Change size for line thickness
+  labs(x = "TP (mg/L)", y = "Frequency") +  # Change x and y axis names
+  theme(
+    axis.text = element_text(size = 12),  # Adjust font size for axis text
+    axis.title = element_text(size = 15),  # Adjust font size for axis titles
+    plot.title = element_text(size = 15),  # Adjust font size for title
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),   # Remove minor grid lines
+    axis.text.x = element_text(angle = 0, hjust = 1),  # Rotate x-axis labels vertically
+    panel.background = element_blank(), 
+    plot.background = element_blank()) +  
+  scale_x_continuous(breaks = seq(0, 1, by = 0.5), labels = seq(0, 1, by = 0.5), limits = c(0, 1), expand = c(0, 0)) +  # Set x-axis limits, breaks, and remove padding
+  scale_y_continuous(breaks = seq(0, 20000, by = 10000), labels = seq(0, 20000, by = 10000), limits = c(0, 20000), expand = c(0, 0))  # Set y-axis breaks and labels 
+
+# Combine the plots with annotation_custom
+tp_usaplot_with_hist <- usaplotTP +
+  annotation_custom(
+    grob = ggplotGrob(hist_TP),
+    xmin = -2800000, xmax = -1000000,  # Adjust these values for positioning
+    ymin = -2500000, ymax = -1000000     # Adjust these values for positioning
+  ) +
+  theme(panel.background = element_rect(fill = "transparent"))  # Set background to transparent
+
+# Display the final plot
+print(tp_usaplot_with_hist)
+
+ggsave("C:\\Research\\TP Analysis\\Figures\\Figure 1\\Status_MeanTP.png", plot = tp_usaplot_with_hist, width = 10, height = 8, units = "in", dpi = 1000)
+```

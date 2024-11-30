@@ -1,0 +1,267 @@
+#Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+#Data
+```{r}
+Remote_Data <- read_feather("C:\\Research\\TP Analysis\\Data\\Remote Data\\CLEAR-TP.feather") #33497
+NHD_Shape <- st_read("C:\\Research\\TP Analysis\\Shape File\\NHDShapeFile\\nhdplusv2_modified_v1.0.shp")
+Hydrodata <-read.csv("C:\\Research\\TP Analysis\\Data\\RiverHydro Data\\RiverHydro.csv")
+
+```
+
+#Remote Data
+```{r}
+Remote_Data <- Remote_Data%>%mutate(date= as.Date(Date))%>%mutate(Year = year(Date), Month = month(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))
+
+Remote_Data <- Remote_Data%>%filter(Year > 2014 & Year < 2019)
+Remote_Data_season <- Remote_Data%>%group_by(ID, Year, Season)%>%summarise(TP = mean(Estimated))%>%mutate(ID_filter = paste0(ID, "_", Year))
+
+Remote_Groups <- Remote_Data%>%group_by(ID, Year)%>%summarise(Count = n_distinct(Season))%>%filter(Count >2)%>%mutate(ID_filter= paste0(ID, "_", Year))
+
+# Convert Remote_Data_season to data.table
+setDT(Remote_Data_season)
+
+# Convert Remote_Groups to data.table
+setDT(Remote_Groups)
+
+# Filter Remote_Data_season based on ID_filter in Remote_Groups
+Remote_Data_season <- Remote_Data_season[Remote_Groups, on = "ID_filter"]
+
+Remote_Avergae <- Remote_Data_season%>%group_by(ID)%>%summarise(TP = mean(TP))
+```
+
+```{r}
+features <- c( "ID", 
+"dis_m3_pyr",  #"cubm/sec"
+"run_mm_cyr",  #"millimeter"
+"rev_mc_usu",  #"cubm/sec"
+"dor_pc_pva",  #"percent dam regulation"
+"ria_ha_csu",  #"river area hectares"
+"ele_mt_cav",  #"elevation meters"
+"slp_dg_cav",  #"slope degree"
+"sgr_dk_rav",  #"stream gradient decimeter per km"
+"clz_cl_cmj",  #"18 class climate zone"
+"tmp_dc_cyr",  #"air temperature"
+"pre_mm_cyr",  #"Precipitation millimeter"
+"aet_mm_cyr",  #"Actual Evaporation millimeter"
+"ari_ix_cav",  #"GAI index value 100 values"
+"glc_cl_cmj",  #"Land Cover Class"
+"glc_pc_c01", "glc_pc_c02", "glc_pc_c03", "glc_pc_c04", "glc_pc_c05", "glc_pc_c06", "glc_pc_c07", "glc_pc_c08", "glc_pc_c09", "glc_pc_c10", "glc_pc_c11", "glc_pc_c12", "glc_pc_c13", "glc_pc_c14", "glc_pc_c15", "glc_pc_c16", "glc_pc_c17", "glc_pc_c18", "glc_pc_c19", "glc_pc_c20", "glc_pc_c21", "glc_pc_c22",
+
+"pnv_cl_cmj",  #"Potential Natural Vegetation Class"
+#Percent for class available
+"pnv_pc_c01", "pnv_pc_c02", "pnv_pc_c03", "pnv_pc_c04", "pnv_pc_c05", "pnv_pc_c06", "pnv_pc_c07", "pnv_pc_c08", "pnv_pc_c09", "pnv_pc_c10", "pnv_pc_c11", "pnv_pc_c12", "pnv_pc_c13", "pnv_pc_c14", "pnv_pc_c15",
+
+"for_pc_cse",  #"Forest percent"
+"crp_pc_cse",  #"Crop percent"
+"pst_pc_cse",  #"Pature percent"
+"ire_pc_cse",  #"Irrigation percent"
+"tbi_cl_cmj",  #"Terrestrial Biomess Class 14"
+#Terrestrail Ecorregion
+"tec_cl_cmj",  #"class"
+"fmh_cl_cmj",  #"class"
+"fec_cl_cmj",  #"class Freshwater ecoregions"
+"cly_pc_cav",  #"cly_pc_cav"
+"slt_pc_cav",  #"slt_pc_cav"
+"snd_pc_cav",  #"snd_pc_cav"
+"soc_th_cav",  #"soc_th_cav"
+"lit_cl_cmj",  #"Lithological class"
+"kar_pc_cse",  #"Karst Area #percent"
+"ero_kh_cav",  #"Soil Erosion kg/hec"
+"ppd_pk_cav",  #"Pop Den people/sq.km"
+"urb_pc_cse",  #"urb_pc_cse"
+"hft_ix_u09"
+ )  #Human Foot print Index value
+
+Hydrodata <- Hydrodata%>%select(, features)
+              
+Hydrodata <- Hydrodata %>%
+  group_by(ID) %>%
+  summarise(across(everything(), mean))
+
+```
+
+#NHD River
+```{r}
+NHD_Shape_River <- NHD_Shape%>%group_by(GNIS_ID)%>%summarise(Total = sum(LENGTHKM))%>%filter(Total > 100)
+NHD_Shape <- NHD_Shape[,c("ID", "GNIS_ID", "GNIS_NA")]
+```
+
+#River Database
+```{r}
+Data_base <- Remote_Avergae%>%left_join(NHD_Shape, by ="ID")
+Data_base <- Data_base%>%left_join(Hydrodata, by ="ID")
+
+River_names <- unique(Data_base$GNIS_ID)
+
+River_Database_corr <- data.frame()
+
+for ( i in (1:length(River_names))){
+
+  river <- River_names[i]
+  
+  Data_base_River <- Data_base%>%filter(GNIS_ID == river)
+  river_name <- Data_base_River$GNIS_NA[1]
+  
+  Cor_river <-cor(Data_base_River$TP, Data_base_River[, features])%>%as.data.frame()
+  
+  colnames(Cor_river) <- features
+  
+  Cor_river$ID <- river
+  
+  Cor_river$name <- river_name
+  
+  Cor_river$Count <- nrow(Data_base_River%>%filter(GNIS_ID == river))
+
+  River_Database_corr <- rbind(River_Database_corr, Cor_river)
+  
+}
+```
+
+#Filter larger rivers
+```{r}
+River_database <- River_Database_corr%>%filter(ID%in%NHD_Shape_River$GNIS_ID)%>%filter(Count > 10)
+data <- River_database
+```
+
+#Filter by max correlation value
+```{r}
+#Remove all NA
+data[is.na(data)] <- 0
+
+#Get Abs Correlation Value
+data$max_correlation <- apply(subset(data, select = -c(ID, name, Count)), 1, function(row) {
+  max_val <- max(row, na.rm = TRUE)
+  min_val <- min(row, na.rm = TRUE)
+  if (abs(max_val) > abs(min_val)) {
+    return(max_val)
+  } else {
+    return(min_val)
+  }
+})
+
+# Function to get the column name with the highest absolute value for a single row
+get_max_abs_col <- function(row) {
+  colnames(subset_data)[which.max(abs(row))]
+}
+
+# Subset the dataframe to exclude certain columns
+subset_data <- data[, !(names(data) %in% c("X", "ID", "name", "Count", "max_correlation", "abs_corr"))]
+
+# Apply the function to each row of the subsetted dataframe
+max_abs_cols <- apply(subset_data, 1, get_max_abs_col)
+
+data$feature <- max_abs_cols
+
+# Tabulate the column names and sort in decreasing order
+tabulated <- sort(table(max_abs_cols), decreasing = TRUE)
+
+# Print the result
+print(tabulated)
+```
+
+#Catergorize
+```{r}
+# Define the names as a vector
+ names_list <- c("run_mm_cyr", "aet_mm_cyr", "tmp_dc_cyr", "ari_ix_cav", "ele_mt_cav",
+                 "crp_pc_cse", "glc_pc_c20", "pre_mm_cyr", "ero_kh_cav", "lit_cl_cmj",
+                 "dis_m3_pyr", "ire_pc_cse", "kar_pc_cse", "pst_pc_cse", "tec_cl_cmj",
+                 "cly_pc_cav", "clz_cl_cmj", "pnv_pc_c05", "dor_pc_pva", "glc_pc_c12",
+                 "glc_pc_c16", "sgr_dk_rav", "slp_dg_cav", "slt_pc_cav", "soc_th_cav",
+                 "tbi_cl_cmj", "fmh_cl_cmj", "for_pc_cse", "glc_pc_c04", "hft_ix_u09",
+                 "pnv_cl_cmj", "pnv_pc_c04", "pnv_pc_c07", "pnv_pc_c09", "pnv_pc_c10",
+                 "pnv_pc_c12", "ppd_pk_cav", "rev_mc_usu", "ria_ha_csu")
+
+# Define the categories
+Hydrology <- c("run_mm_cyr",  "dis_m3_pyr", "ria_ha_csu", "rev_mc_usu", "dor_pc_pva")
+
+Climate <- c("aet_mm_cyr", "tmp_dc_cyr", "ari_ix_cav", "clz_cl_cmj", "pre_mm_cyr")
+
+Physiography <- c("ele_mt_cav", "sgr_dk_rav", "slp_dg_cav")
+
+Land_Cover <- c("crp_pc_cse", "ire_pc_cse", "tec_cl_cmj", "pst_pc_cse", "pnv_pc_c05", 
+              "glc_pc_c12", "glc_pc_c20", "glc_pc_c16",  
+              "tbi_cl_cmj", "fmh_cl_cmj", "for_pc_cse", "glc_pc_c04", "pnv_pc_c07", 
+              "pnv_pc_c09", "pnv_pc_c10", "pnv_pc_c12", "pnv_cl_cmj", "pnv_pc_c04")
+
+Anthropogenic <- c("hft_ix_u09", "ppd_pk_cav", "kar_pc_cse", "slt_pc_cav", "soc_th_cav", "cly_pc_cav")
+
+Geology <- c("ero_kh_cav", "lit_cl_cmj")
+
+# Assign categories based on the feature column
+data$category[data$feature %in% Hydrology] <- "Hydrology"
+data$category[data$feature %in% Climate] <- "Climate"
+data$category[data$feature %in% Physiography] <- "Physiography"
+data$category[data$feature %in% Land_Cover] <- "Landcover"
+data$category[data$feature %in% Anthropogenic] <- "Anthropogenic"
+data$category[data$feature %in% Geology] <- "Soils & Geology"
+
+
+# Check the result
+head(data)
+data$abs_correlation <- abs(data$max_correlation)
+max(data$abs_correlation)
+min(data$abs_correlation)
+```
+
+```{r}
+plot <- ggplot(data, aes(x = abs_correlation, y = ..density..)) +
+  geom_histogram(binwidth = 0.05, color = "black", fill = "#69b3a2", alpha = 0.7) +
+  geom_density(alpha = 0.2, fill = "#FF9999") +
+  labs(
+    title = "Histogram and Density Plot of Absolute Correlation",
+    x = "Absolute Correlation Value (r)",
+    y = "Density"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 30, face = "bold"),
+    axis.title = element_text(size = 30),
+    axis.text = element_text(size = 25),
+    axis.line = element_line(color = "black", size = 1.5),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    #plot.margin = margin(l = 50, r = 10, t = 10, b = 10, unit = "pt")  # Adjust left margin
+  ) +
+  annotate("text", x = 0.8, y = 3, label = "", color = "#FF9999", size = 5, angle = 0, fontface = "bold") +
+  annotate("text", x = 0.8, y = 2.5, label = "", color = "#69b3a2", size = 5, angle = 0, fontface = "bold")
+
+plot
+
+ggsave("C:\\Users\\Admin\\OneDrive - University of Cincinnati\\Desktop\\plot.png", plot = plot , width = 10, height = 10, units = "in", dpi = 300)
+
+table(data$category)
+#write.csv(data, "C:\\Research\\TP Analysis\\Cache\\Factors\\Key_Factors.csv")
+```
+```{r}
+# Load necessary libraries
+library(sf)
+library(dplyr)
+
+# Read the shapefile
+NHD_Shape <- st_read("C:\\Research\\TP Analysis\\Shape File\\NHDShapeFile\\nhdplusv2_modified_v1.0.shp")
+
+# Summarize total length for each GNIS_ID
+NHD_Length <- NHD_Shape %>%
+  group_by(GNIS_ID) %>%
+  summarise(Total_KM = sum(LENGTHKM_, na.rm = TRUE))
+
+# Join the summarized length data with the main data
+data_length <- data %>% 
+  left_join(NHD_Length, by = c("ID" = "GNIS_ID"))
+
+# Save the resulting data to a CSV file
+write.csv(data_length, "C:\\Research\\TP Analysis\\Cache\\Factors\\Key_Factors_length.csv", row.names = FALSE)
+
+
+
+```
+

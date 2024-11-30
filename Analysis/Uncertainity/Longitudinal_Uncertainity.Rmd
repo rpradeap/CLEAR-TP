@@ -1,0 +1,181 @@
+#Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+
+```{r}
+data <- read_feather("C:\\Research\\TP Analysis\\Cache\\Uncertainity\\multiple_database.feather")
+```
+
+# Qualifying rivers
+```{r}
+Qualifying_River <- read.csv("C:\\Research\\Archive\\TP_Part2\\Notes\\Analysis\\Longitudinal_TP_trend\\River_Length_Summary_ID.csv")
+NHD_Shape <- st_read("C:\\Research\\General Data\\Shape File\\NHDShapeFile\\nhdplusv2_modified_v1.0.shp")
+
+# Check column names to ensure GNIS_ID and GNIS_NA exist
+colnames(NHD_Shape)
+
+# Assuming GNIS_ID and GNIS_NA exist, proceed with the operation
+NHD_Shape_Rivers <- NHD_Shape[, c("GNIS_ID", "GNIS_NA")]%>%
+  st_drop_geometry() %>%
+  distinct()
+
+NHD_Shape_Rivers$GNIS_ID <- as.integer(NHD_Shape_Rivers$GNIS_ID)
+
+River_Summary <- Qualifying_River %>%
+  filter(Total_KM > 100 & Total_KM < 300000) %>%
+  arrange(desc(Total_KM)) %>%
+  left_join(NHD_Shape_Rivers, by = c("River" = "GNIS_ID"))
+
+River_Names_ID <- NHD_Shape %>%
+  group_by(GNIS_NA) %>%
+  summarise(GNIS_ID = paste(unique(GNIS_ID), collapse = ", ")) #Multiple rivers have same name; use river ID
+```
+#Find the starting point (Headwater)
+```{r}
+Startpoint <- read.csv("C:\\Research\\Archive\\TP_Part2\\Notes\\Analysis\\Longitudinal_TP_trend\\Startpoint_ID.csv")
+Joined <- read.csv("C:\\Research\\TP Analysis\\Analysis\\Longitudinal Change\\Reach_Station_Combined\\Remote_Gauge_Comb_ID.csv")
+Gauge_data <- read.csv("C:\\Research\\TP Analysis\\Data\\Gauge Data\\gauge.data.csv")
+
+#River_name_I <- "Red River"
+River_name <- River_Summary%>%filter(GNIS_NA == "Red River")
+River_name <-River_name$River%>%as.integer()
+
+River_headwater_ID <- Startpoint %>%
+  filter(GNIS_ID == River_name) %>%
+  select(ID) %>%
+  pull(ID) %>%
+  as.integer()
+
+
+NHD_river_IDs <- NHD_Shape%>%filter(GNIS_ID == River_name) #To avoid tributary and consider only main channel 
+
+ordered_river <- data.frame()
+current_ID <- River_headwater_ID
+while (TRUE) {
+  first <- NHD_river_IDs %>% filter(ID == current_ID)
+  if (nrow(first) == 0) {
+    # Break the loop if no matching rows are found
+    break
+  }
+  ordered_river <- rbind(ordered_river, first)
+  current_ID <- first$toID
+}
+
+NHD_river_ID_ordered <- ordered_river
+NHD_river_ID_ordered  <- NHD_river_ID_ordered[, c("ID", "LENGTHKM_", "QE_MA")]%>%
+  mutate( Discharge = QE_MA * 0.0283168,
+    Cum_distance = cumsum(LENGTHKM_))
+
+data_filtered <- data%>%filter(ID%in%NHD_river_ID_ordered$ID)
+
+data_filtered <- data_filtered%>%mutate(Date= as.Date(Date))%>%mutate(Year = year(Date), Month = month(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))%>%mutate(ID_Year = paste(ID, Year, sep = "_"))
+
+#By Season 
+# By Season 
+Season <- data_filtered %>%
+  group_by(ID, Year) %>%
+  summarise(Season_Count = n_distinct(Season)) %>%
+  filter(Season_Count > 2) %>%
+  mutate(ID_Year = paste(ID, Year, sep = "_")) # Criteria to consider year with all seasons
+
+IDs <- Season$ID_Year
+
+# Merging with the original dataset to filter by ID_Year
+data_filtered_season <- data_filtered %>%
+  mutate(ID_Year = paste(ID, Year, sep = "_")) %>%
+  filter(ID_Year %in% IDs)
+
+
+Year <- data_filtered_season%>%group_by(ID, Year)%>%
+                          summarise(Season = n_distinct(Season))%>%unique()
+
+year_data <- Year %>%
+  group_by(Year) %>%
+  summarise(Count = n_distinct(ID)) %>%
+  arrange(desc(Count))
+
+year_selected <- year_data$Year[1]
+
+
+output_river <- data_filtered_season%>%
+  filter(ID%in% NHD_river_ID_ordered$ID)
+
+output_river<- output_river%>%filter(Year == year_selected)
+
+output_river_data <- output_river%>%group_by(ID, Year, Seed)%>%summarise(TP = mean(Noise), Original = mean(Estimated))
+
+output_river_data <- output_river_data%>%left_join(NHD_river_ID_ordered, by = "ID")
+
+
+IDs_rivers <- Joined%>%filter(ID%in%NHD_river_ID_ordered$ID)
+
+Gauge_Data_ID_rivers <- Gauge_data%>%filter(MonitoringLocationIdentifier%in%IDs_rivers$MonitoringLocationIdentifier)%>%
+                                      mutate(Year = year(ActivityStartDate), Month = month(ActivityStartDate))%>%filter(Year<2019)%>%
+                                      mutate(Season = case_when(
+                                        Month %in% 3:5 ~ "Spring",
+                                        Month %in% 6:8 ~ "Summer",
+                                        Month %in% 9:11 ~ "Autumn",
+                                        TRUE ~ "Winter" ))%>%mutate(Year_ID = paste0(MonitoringLocationIdentifier, Year))
+
+Gauge_Data_Year_Count <- Gauge_Data_ID_rivers%>%group_by(MonitoringLocationIdentifier, Year)%>%
+                          summarise(Season = n_distinct(Season))%>%
+                          filter(Season > 2)%>%mutate(Year_ID = paste0(MonitoringLocationIdentifier, Year))
+
+Gauge_Data_filtered <- Gauge_Data_ID_rivers%>%filter(Year_ID%in%Gauge_Data_Year_Count$Year_ID)
+
+Gauge_Data_filtered <- Gauge_Data_filtered%>%filter(Year == 1995)
+ 
+Gauge_Data_ID_rivers <- Gauge_Data_filtered%>%group_by(MonitoringLocationIdentifier, Year)%>%summarise(Gauge_TP = mean(ResultMeasureValue))%>%left_join(IDs_rivers, by = "MonitoringLocationIdentifier")
+
+Gauge_estimate <- Gauge_Data_ID_rivers%>%group_by(ID)%>%summarise(Gauge_TP = mean(Gauge_TP))
+Gauge_river <- output_river_data%>%left_join(Gauge_estimate, by ="ID")%>%group_by(Cum_distance)%>%summarise(Gauge_TP = mean(Gauge_TP))
+
+red <- ggplot(output_river_data) +
+  geom_line(aes(x = Cum_distance, y = TP, color = as.factor(Seed), group = Seed), size = 2) +  # Combine Seed values into one legend entry
+  geom_line(aes(x = Cum_distance, y = Original, color = "Original"), size = 1.2) +  # Red line for 'Original' data
+  scale_color_manual(
+    values = c("Original" = "red", "grey60"),
+    name = "Legend"  # Optional legend title (can be left as "")
+  ) +
+  labs(
+    x = "Distance from the Headwater (Km)", 
+    y = "TP (mg/L)", 
+    color = ""  # Editable legend title
+  ) +
+  geom_point(
+    data = Gauge_river, 
+    aes(x = Cum_distance, y = Gauge_TP), 
+    size = 3, 
+    shape = 16,  # Shape corrected (16 is a filled circle)
+    color = "red"  # Red color for points
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),      # Remove grid lines
+    panel.border = element_rect(color = "black", fill = NA),  # Add border around plot area
+    axis.text = element_text(color = "black", size = 16),     # Black axis text, increased size
+    axis.title = element_text(color = "black", size = 16),    # Black axis titles, increased size
+    legend.text = element_text(color = "black", size = 16),   # Black legend text, increased size
+    legend.title = element_text(color = "black", size = 16)   # Black legend title, increased size
+  )
+
+
+
+
+ggsave(paste0("C:\\Users\\Admin\\OneDrive - University of Cincinnati\\Desktop\\Long_Profile", ".jpg"), 
+       plot = red, width = 20, height = 4, units = "in", dpi = 300)
+
+```
+
+
+
+
+
+
+

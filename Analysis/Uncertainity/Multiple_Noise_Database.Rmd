@@ -1,0 +1,133 @@
+#Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+#Data
+```{r}
+Remote_Data <- read_feather("C:\\Research\\TP Analysis\\Data\\Remote Data\\CLEAR-TP.feather")
+```
+
+```{r}
+library(Metrics)
+
+Data <- read.csv("C:\\Research\\TP Analysis\\Analysis\\Uncertainity\\ML\\output.csv")
+
+Data <- Data %>%
+  rowwise() %>%
+  mutate(MAE = mean((Predicted - Actual)/Actual))
+
+```
+
+```{r}
+# Initialize an empty data frame to store filtered data
+filtered_data <- data.frame()
+
+interval <- 0.2
+
+# Loop through different ranges of 'Actual' values
+for (i in seq(0, 1, interval)) {
+  
+  # Filter the data for the current range of 'Actual' values
+  Data_filtered <- Data %>% filter(Actual > i & Actual <= i + interval)
+  
+  # Filter MAE values within the interquartile range (IQR)
+  MAE_value <- Data_filtered$MAE
+  Q1 <- quantile(MAE_value, 0.25)
+  Q3 <- quantile(MAE_value, 0.75)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  # Remove outliers based on the IQR
+  Data_filtered <- Data_filtered %>% filter(MAE >= lower_bound & MAE <= upper_bound)
+  
+  # Append filtered data to the initialized data frame
+  filtered_data <- bind_rows(filtered_data, Data_filtered)
+  
+}
+
+```
+
+```{r}
+# Load necessary library
+library(dplyr)
+library(fitdistrplus)
+
+# Initialize an empty list to store the final results across all seeds
+all_results <- list()
+
+# Loop through 20 different seeds
+for (seed in 109:(109 + 19)) {
+  
+  set.seed(seed)  # Set the seed for random noise
+  
+  # Initialize a list to store the results for each interval within this seed
+  results <- list()
+  
+  # Loop through intervals from 0 to 1 with a step of 0.1
+  for (i in seq(0, 1, by = interval)) {
+    
+    # Filter Remote_Data based on the current interval for Predicted values
+    Data_interval <- Remote_Data %>%
+      filter(Estimated > i & Estimated <= i + interval)
+    
+    # Filter filtered_data based on the current interval for Actual values
+    set_interval <- filtered_data %>%
+      filter(Actual > i & Actual <= i + interval)
+    
+    # Check if there are sufficient MAE values to proceed
+    if (nrow(set_interval) > 1 && all(!is.na(set_interval$MAE))) {
+      
+      # Add 1 to MAE values for fitting
+      data_test <- set_interval$MAE + 1
+      
+      # Check for valid values in data_test
+      data_test <- data_test[!is.na(data_test) & is.finite(data_test)]
+      
+      if (length(data_test) > 1) {
+        # Fit a log-normal distribution to data_test
+        fit <- fitdist(data_test, "lnorm")
+        
+        # Extract parameters from the fit
+        meanlog <- fit$estimate["meanlog"]
+        sdlog <- fit$estimate["sdlog"]
+        
+        # Add a new column with random values from the log-normal distribution
+        Data_interval <- Data_interval %>%
+          mutate(Random_noise = rlnorm(n(), meanlog, sdlog) - 1)
+        
+        # Store the result in the list for this interval
+        results[[paste0("Data_", i, "_", i + 0.1)]] <- Data_interval
+      }
+    }
+  }
+  
+  # Combine all intervals for the current seed into a single dataframe
+  seed_data <- bind_rows(results)
+  
+  # Add a column for the seed number to track it
+  seed_data$Seed <- seed
+  
+  # Calculate final Noise column
+  seed_data$Noise <- seed_data$Estimated * (1 + seed_data$Random_noise)
+  
+  # Store the result in the list for all seeds
+  all_results[[paste0("Seed_", seed)]] <- seed_data
+}
+
+# Combine all results into a single dataframe
+final_data <- bind_rows(all_results)
+
+# View the final data (if needed)
+print(final_data)
+
+write_feather(final_data,"C:\\Research\\TP Analysis\\Cache\\Uncertainity\\multiple_database.feather")
+
+#0.1236573
+```
+
+
+
+
+
+

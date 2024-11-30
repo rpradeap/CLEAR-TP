@@ -1,0 +1,118 @@
+#Extract Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+#Get Data
+```{r}
+Remote_Data <- read_feather("C:\\Research\\TP Analysis\\Data\\Remote Data\\CLEAR-TP.feather") #33497
+NHD_Shape <- st_read("C:\\Research\\TP Analysis\\Shape File\\NHDShapeFile\\nhdplusv2_modified_v1.0.shp")
+
+
+Gauge_Data <- read.csv("C:\\Research\\TP Analysis\\Data\\Gauge Data\\gauge.data.csv")
+```
+#Gauge And Reach Joined
+```{r}
+Joined <- read.csv("C:\\Research\\TP Analysis\\Cache\\Riverine TP database\\Reach_Station_100m.csv")
+Joined <- Joined%>%drop_na()%>%distinct()
+```
+
+#Mutate Column
+```{r}
+Remote_Data <- Remote_Data%>%mutate(date= as.Date(Date))%>%mutate(Year = year(Date), Month = month(Date), Week = week(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))%>%select(ID, Date, Year, Month, Season, Week, Estimated)
+
+Gauge_Data <- Gauge_Data%>%mutate(Date= as.Date(ActivityStartDate))%>%mutate(Year = year(Date), Month = month(Date), Week = week(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))%>%select(MonitoringLocationIdentifier, Date, Year, Month, Season, Week, ResultMeasureValue)
+```
+
+#Week
+```{r}
+Remote_Data$Common <- paste0(Remote_Data$Year, Remote_Data$Month, Remote_Data$Week)
+Gauge_Data$Common <- paste0(Gauge_Data$Year, Gauge_Data$Month, Gauge_Data$Week)
+
+Remote_Data_Week <- Remote_Data%>%group_by(ID, Common)%>%summarise(Remote = median(Estimated))
+Gauge_Data_Week <- Gauge_Data%>%group_by(MonitoringLocationIdentifier, Common)%>%summarise(Gauge = median(ResultMeasureValue))
+
+Data_Base_Week <- data.frame()
+
+for (i in 1:nrow(Joined)){
+
+  station <- Joined$MonitoringLocationIdentifier[i]
+  remote <- Joined$field_1[i]
+  
+  station_data <- Gauge_Data_Week%>%filter(MonitoringLocationIdentifier == station)
+  remote_data <- Remote_Data_Week%>%filter(ID == remote)
+  
+  match_data <- station_data %>% left_join(remote_data, by = "Common")
+  
+  Data_Base_Week <- rbind(Data_Base_Week, match_data)
+  print(i)
+
+}
+```
+
+#Analysis on matched data
+```{r}
+Data_Base_Week <- read.csv("C:\\Research\\TP Analysis\\Cache\\Riverine TP database\\Database_Week_Matchup.csv")
+
+Data_Base_Week <- Data_Base_Week%>%drop_na()
+
+mae(Data_Base_Week$Gauge, Data_Base_Week$Remote)
+
+Data_Base_Week$error <- (Data_Base_Week$Remote- Data_Base_Week$Gauge)/ (Data_Base_Week$Gauge)*100
+
+mean(Data_Base_Week$error)
+median(Data_Base_Week$error)
+quantile(Data_Base_Week$error)
+
+Error <- Data_Base_Week%>%group_by(ID)%>%summarise(Error = mean(error), Count = n())
+mean(Error$Count)
+median(Error$Count)
+```
+
+#Plot the Figure
+```{r}
+# Calculate IQR
+Q1 <- quantile(Data_Base_Week$error, 0.25)
+Q3 <- quantile(Data_Base_Week$error, 0.75)
+IQR <- Q3 - Q1
+
+# Define the lower and upper bounds for outliers
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+
+# Filter the data to remove outliers
+filtered_data <- Data_Base_Week[Data_Base_Week$error >= lower_bound & Data_Base_Week$error <= upper_bound, ]
+
+# Basic distribution plot
+# Basic distribution plot
+p <- ggplot(filtered_data, aes(x = error)) + 
+  geom_density(alpha = 0.8, color = "darkblue", size = 0.7, fill = viridis::viridis(1, option = "magma")) +
+  theme_minimal() +
+  labs(title = "Density Plot of Percent Error (Remote and Actual)",
+       x = "Percent Error (%)",
+       y = "Density") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.position = "none",
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.line = element_line(size = 1.2, color = "black"),  # Make axis lines bolder
+    axis.ticks = element_line(size = 1.2, color = "black")  # Make axis ticks bolder
+  )
+
+# Display the plot
+print(p)
+
+```

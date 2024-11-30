@@ -1,0 +1,276 @@
+#Install Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+
+#Data
+```{r}
+Remote_Data <- read_feather("C:\\Research\\TP Analysis\\Data\\Remote Data\\CLEAR-TP.feather") #33497
+NHD_Shape <- st_read("C:\\Research\\TP Analysis\\Shape File\\NHDShapeFile\\nhdplusv2_modified_v1.0.shp")
+```
+#Remote TP data
+```{r}
+Remote_Data <- Remote_Data%>%mutate(Date= as.Date(Date))%>%mutate(Year = year(Date), Month = month(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))
+
+Remote_Data <- Remote_Data%>%mutate(ID_Year = paste(ID, Year, sep = "_"))
+
+#By Season 
+Remote_Season_ID <- Remote_Data %>%
+  group_by(ID, Year) %>%
+  summarise(Season_Count = n_distinct(Season)) %>%
+  filter(Season_Count >= 3) %>%
+  mutate(ID_Year = paste(ID, Year, sep = "_")) # Criteria to consider year will all seasons
+
+Remote_Filtered_Data <- Remote_Data %>%
+  filter(ID_Year %in% Remote_Season_ID$ID_Year)
+
+#Averaging 
+Remote_Data_Average <- Remote_Filtered_Data%>%group_by(ID, Year, Season)%>%summarise(TP_Season = mean(Estimated)) 
+Remote_Data_Average_Year <- Remote_Data_Average%>%group_by(ID, Year)%>%summarise(TP = mean(TP_Season))
+Remote_Data_Average_Overall <- Remote_Data_Average_Year%>%group_by(ID)%>%summarise(TP = mean(TP))
+```
+
+#Get all confluence locations based on the river network
+```{r}
+NHD_Shape_rivers_ID <- NHD_Shape[, c('ID', 'toID', 'GNIS_ID', "QA_MA")] %>%
+  st_drop_geometry() %>%
+  distinct()
+
+NHD_Shape_rivers_ID$Index <- 0
+# Initialize tributary as an empty data frame with the same structure as NHD_Shape_rivers_ID
+
+tributary <- data.frame(ID = character(), toID = character(), GNIS_ID = character(), stringsAsFactors = FALSE)
+
+# Initialize j to 0 outside of the loop
+j <- 0
+
+# Initialize an empty data frame for tributaries
+tributary <- data.frame()  # Adjust columns according to your needs
+
+# Loop through unique river IDs
+for (i in unique(NHD_Shape$ID)) {
+  #print(i)  # Print the current river ID
+  
+  # Filter datasets for current ID and its tributaries
+  river_1 <- NHD_Shape_rivers_ID %>% filter(ID == i)
+  river_2 <- NHD_Shape_rivers_ID %>% filter(toID == i)
+  
+  # Check if river_1 and river_2 are non-empty
+  if (nrow(river_1) > 0 && nrow(river_2) > 0) {
+    # Remove NA values from GNIS_ID before comparison
+    gnis_1 <- na.omit(river_1$GNIS_ID)
+    gnis_2 <- na.omit(river_2$GNIS_ID)
+    
+    # Check if any GNIS_IDs are different
+    if (length(gnis_1) > 0 && length(gnis_2) > 0 && any(gnis_1 != gnis_2)) {
+      j <- j + 1  # Increment j if condition is satisfied
+      river_1$Index <- j  # Assign the current index to river_1
+      river_2$Index <- j  # Assign the same index to river_2
+      
+      # Combine the two rivers into the tributary dataframe
+      tributary <- rbind(tributary, river_1, river_2)
+    }
+  }
+}
+
+# After the loop, tributary will contain the combined data
+
+write.csv(tributary, "C:\\Research\\TP Analysis\\Cache\\Dams and Tributaries\\Main_Tributary_River.csv")
+```
+
+#Find the Smaller and Larger Tributary 
+```{r}
+tributary <- read.csv("C:\\Research\\TP Analysis\\Cache\\Dams and Tributaries\\Main_Tributary_River.csv")
+
+# Initialize empty data frames for Larger and Smaller
+Larger <- data.frame()
+Smaller <- data.frame()
+
+# Loop over unique values of Index
+for (i in unique(tributary$Index)) {
+  # Filter the data based on the current index
+  data <- tributary %>% filter(Index == i)
+  
+  # Check if there are at least 2 rows in 'data' to avoid subscript errors
+  if (nrow(data) < 2) {
+    next  # Skip iteration if there aren't enough rows
+  }
+  
+  # Check if the StrmOrd values are the same, skip the iteration if they are
+  if (data$QA_MA[1] == data$QA_MA[2]) {
+    next
+  }
+  
+  # If the first StrmOrd is greater than the second by more than 1
+  if (data$QA_MA[1] > data$QA_MA[2]*2) {
+    Larger <- rbind(Larger, data[1, ])
+    Smaller <- rbind(Smaller, data[2, ])
+  
+  # Otherwise, if the second StrmOrd is greater than the first by more than 1
+  } else if (data$QA_MA[2] > data$QA_MA[1]*10) {
+    Larger <- rbind(Larger, data[2, ])
+    Smaller <- rbind(Smaller, data[1, ])
+  }
+}
+
+
+```
+
+# Percent Change in Tributary River 
+```{r}
+Smaller_Change <- data.frame(River_ID = character(), Change = numeric(), stringsAsFactors = FALSE)
+
+UP_all = data.frame()
+Down_all = data.frame()
+
+for (i in unique(Smaller$ID)) {
+  
+  # Filter the data for the current ID
+  Smaller_ID <- Smaller %>% filter(ID == i)
+  
+  # Find the upstream data
+  Up <- NHD_Shape %>% filter(toID == i & GNIS_ID == Smaller_ID$GNIS_ID)
+  
+  # Check if Up is not empty
+  if (nrow(Up) > 0) {
+    # Get upstream and downstream TP values
+    Up_TP <- Remote_Data_Average_Overall %>% filter(ID == Up$ID)  
+    Down_TP <- Remote_Data_Average_Overall %>% filter(ID == i)
+    
+    # Ensure that both Up_TP and Down_TP have data 
+    if (nrow(Up_TP) > 0 & nrow(Down_TP) > 0) {
+      # Calculate river ID and percentage change
+      river_ID <- Up$GNIS_ID
+      change <- ((Down_TP$TP - Up_TP$TP) / Up_TP$TP) * 100
+      
+      UP_all <- rbind(UP_all, Up_TP)
+      Down_all <- rbind(Down_all, Down_TP)
+      # Bind the result to the Smaller_Change dataframe
+      Smaller_Change <- rbind(Smaller_Change, data.frame(River_ID = river_ID, Change = change, stringsAsFactors = FALSE))
+    }
+  }
+}
+
+# Perform Wilcoxon signed-rank test for paired samples
+test_result <- wilcox.test(UP_all$TP, Down_all$TP, paired = TRUE)
+
+# Check if the p-value is less than 0.05 and print a message
+if (test_result$p.value < 0.05) {
+  print("The difference between Upstream and Downstream is statistically significant.")
+} else {
+  print("The difference between Upstream and Downstream is not statistically significant.")
+}
+
+
+
+```
+
+# Percent change in Main river
+```{r}
+Larger_Change <- data.frame(River_ID = character(), Change = numeric(), stringsAsFactors = FALSE)
+
+UP_all = data.frame()
+Down_all = data.frame()
+
+for (i in unique(Larger$ID)) {
+  
+  # Filter the data for the current ID
+  Larger_ID <- Larger %>% filter(ID == i)
+  
+  # Find the upstream data
+  Up <- NHD_Shape %>% filter(toID == i & GNIS_ID == Larger_ID$GNIS_ID)
+  
+  # Check if Up is not empty
+  if (nrow(Up) > 0) {
+    # Get upstream and downstream TP values
+    Up_TP <- Remote_Data_Average_Overall %>% filter(ID == Up$ID)  
+    Down_TP <- Remote_Data_Average_Overall %>% filter(ID == i)
+    
+    # Ensure that both Up_TP and Down_TP have data
+    if (nrow(Up_TP) > 0 & nrow(Down_TP) > 0) {
+      # Calculate river ID and percentage change
+      river_ID <- Up$GNIS_ID
+      change <- ((Down_TP$TP - Up_TP$TP) / Up_TP$TP) * 100
+      
+      UP_all <- rbind(UP_all, Up_TP)
+      Down_all <- rbind(Down_all, Down_TP)
+      # Bind the result to the Larger_Change dataframe
+      Larger_Change <- rbind(Larger_Change, data.frame(River_ID = river_ID, Change = change, stringsAsFactors = FALSE))
+    }
+  }
+}
+
+# Perform Wilcoxon signed-rank test for paired samples
+test_result <- wilcox.test(UP_all$TP, Down_all$TP, paired = TRUE)
+
+# Check if the p-value is less than 0.05 and print a message
+if (test_result$p.value < 0.05) {
+  print("The difference between Upstream and Downstream is statistically significant.")
+} else {
+  print("The difference between Upstream and Downstream is not statistically significant.")
+}
+```
+
+```{r}
+
+library(ggplot2)
+library(patchwork)
+
+
+# Create the histogram for Larger_Change
+Larger <- ggplot(Larger_Change, aes(x = Change, fill = Change > 0)) +
+  geom_histogram(alpha = 0.8, , position = "identity") +  # Histogram with transparency and 30 bins
+  scale_fill_manual(values = c("lightcoral", "lightblue"),  # Color for negative and positive
+                    name = "Change Direction", 
+                    labels = c("Negative", "Positive")) +  # Label the legend
+  labs(title = "Main River", x = "Change (%)", y = "Count") +  # Adjust labels
+  theme_minimal() +  # Use a clean minimal theme
+  scale_y_continuous(expand = c(0, 0)) +  # Adjust y-axis scaling
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16),  # Center and size the title
+    axis.title = element_text(size = 14),  # Increase axis title size
+    axis.text = element_text(size = 14),  # Increase axis text size
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.line = element_line(size = 1),  # Increase axis line thickness
+    legend.title = element_text(size = 14),  # Increase legend title size
+    legend.text = element_text(size = 14),
+    panel.border = element_rect(color = "black", fill = NA, size = 1)  # Add a box around the plot
+  ) +
+  ylim(0, 3) +  # Adjust y-axis limits for counts
+  xlim(-10, 10)  # Adjust x-axis limits
+
+# Create the histogram for Smaller_Change, removing the legend
+Smaller <- ggplot(Smaller_Change, aes(x = Change, fill = Change > 0)) +
+  geom_histogram(alpha = 0.8, bins = 30) +  # Histogram with transparency and 30 bins
+  scale_fill_manual(values = c("lightcoral", "lightblue"),  # Color for negative and positive
+                    name = "Change Direction", 
+                    labels = c("Negative", "Positive")) +  # Label the legend
+  labs(title = "Tributary River", x = "Change (%)", y = "Count") +  # Adjust labels and title
+  theme_minimal() +  # Use a clean minimal theme
+  scale_y_continuous(expand = c(0, 0)) +  # Adjust y-axis scaling
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16),  # Center and size the title
+    axis.title = element_text(size = 14),  # Increase axis title size
+    axis.text = element_text(size = 14),  # Increase axis text size
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.line = element_line(size = 1),  # Increase axis line thickness
+    legend.title = element_text(size = 14),  # Increase legend title size
+    legend.text = element_text(size = 14),
+    panel.border = element_rect(color = "black", fill = NA, size = 1),  # Add a box around the plot
+    legend.position = "none"  # Remove the legend from this plot
+  ) +
+  ylim(0, 3) +  # Adjust y-axis limits for counts
+  xlim(-10, 10)  # Adjust x-axis limits
+
+# Combine the plots using patchwork and ensure they share the same legend
+Fig <- (Larger + Smaller) + plot_layout(ncol = 2) & theme(legend.position = "bottom")
+
+ggsave("C:\\Research\\TP Analysis\\Figures\\Supporting Figures\\Tributary.png", plot = Fig, width = 10, height = 5, units = "in", dpi = 1000)
+```

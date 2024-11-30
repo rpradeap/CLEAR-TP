@@ -1,0 +1,289 @@
+#Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+# ML estimation 
+```{r}
+Data <- read.csv("C:\\Research\\TP Analysis\\Analysis\\Uncertainity\\ML\\output.csv")
+
+Data <- Data %>%
+  rowwise() %>%
+  mutate(MAE = mean((Predicted - Actual)/Actual))
+```
+
+# Remove outliers
+```{r}
+# Initialize an empty data frame to store filtered data
+filtered_data <- data.frame()
+
+interval <- 0.2
+
+# Loop through different ranges of 'Actual' values
+for (i in seq(0, 1, interval)) {
+  
+  # Filter the data for the current range of 'Actual' values
+  Data_filtered <- Data %>% filter(Actual > i & Actual <= i + interval)
+  
+  # Filter MAE values within the interquartile range (IQR)
+  MAE_value <- Data_filtered$MAE
+  Q1 <- quantile(MAE_value, 0.25)
+  Q3 <- quantile(MAE_value, 0.75)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  # Remove outliers based on the IQR
+  Data_filtered <- Data_filtered %>% filter(MAE >= lower_bound & MAE <= upper_bound)
+  
+  # Append filtered data to the initialized data frame
+  filtered_data <- bind_rows(filtered_data, Data_filtered)
+  
+}
+
+```
+
+#Error Distribution 
+```{r}
+library(fitdistrplus)
+library(ggplot2)
+library(brms)
+library(ggplot2)
+library(fitdistrplus)
+library(gridExtra)
+
+# Define the intervals and an empty list to store plots
+intervals <- seq(0, 1, by = interval)  # 10 intervals from 0 to 1
+plot_list <- list()  # List to store individual plots
+
+# Loop through each interval and generate the plots
+for (i in 1:(length(intervals)-1)) {
+  lower_bound <- intervals[i]
+  upper_bound <- intervals[i+1]
+  
+  # Filter data for each interval
+  set_1 <- filtered_data %>%
+    filter(Actual > lower_bound, Actual <= upper_bound)
+  
+  # Ensure that MAE column exists in the filtered data
+  data_test <- set_1$MAE + 1  # Add 1 to MAE values
+  
+  # Fit the log-normal distribution to the data
+  fit <- fitdist(data_test, "lnorm")
+  
+  # Plot the distribution
+  distribution <- ggplot(data = data.frame(x = data_test), aes(x)) +
+    geom_histogram(aes(y = ..density..), bins = 50, fill = "lightblue", color = "black") +
+    stat_function(fun = dlnorm, args = list(meanlog = fit$estimate["meanlog"], sdlog = fit$estimate["sdlog"]), 
+                  color = "red", size = 1) +
+    labs(title = paste0("(", lower_bound, "-", upper_bound, ")"), x = "Percent Bias (%)", y = "Density") +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5), 
+      axis.title = element_text(size = 12, face = "plain"), 
+      axis.text = element_text(size = 12, face = "plain")
+    ) +
+    scale_x_continuous(labels = function(x) ((x - 1) * 100))  # Shift the x-axis labels by -1
+  
+  # Generate the PP-Plot
+  ppc_data <- as.data.frame(ppcomp(fit))  # Extract data from the ppc object
+  
+  ppPlot <- ggplot(ppc_data, aes(x = obs, y = probabilities)) +
+    geom_point(color = "red", size = 3) +  # Increase point size for better visibility
+    geom_abline(intercept = 0, slope = 1, color = "black", size = 1) + # Diagonal line
+    theme_minimal() +  # Use a cleaner theme
+    theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Bold title
+      axis.title = element_text(size = 12, face = "plain"),  # Non-bold axis titles
+      axis.text = element_text(size = 12, face = "plain"),  # Non-bold axis text
+      panel.grid.major = element_line(color = "gray80"),  # Light major gridlines
+      panel.grid.minor = element_blank(),  # Remove minor gridlines for simplicity
+      plot.background = element_rect(fill = "white"),  # Set plot background to white
+      panel.background = element_rect(fill = "white")  # Set panel background to white
+    ) +
+    labs(
+      title = paste0("PP-Plot (", lower_bound, "-", upper_bound, ")"),
+      x = "Theoretical Probabilities",
+      y = "Empirical Probabilities"
+    )
+  
+  # Add the individual plots to the list
+  plot_list[[i]] <- grid.arrange(distribution, ppPlot, ncol = 2)
+}
+
+# Save the combined plot grid to a PNG file
+ggsave("C:\\Research\\TP Analysis\\Analysis\\Uncertainity\\ML\\pp_plot.png", 
+       plot = grid.arrange(grobs = plot_list, ncol = 2), 
+       width = 16, height = 12, dpi = 300)
+
+```
+
+#Develop noise infused database
+```{r}
+Remote_Data <- read_feather("C:\\Research\\TP Analysis\\Data\\Remote Data\\CLEAR-TP.feather") #33497
+
+# Set seed for reproducibility
+set.seed(119)
+
+# Initialize an empty list to store the results for each interval
+results <- list()
+
+
+# Loop through intervals from 0 to 1 with a step of 0.1
+for (i in seq(0, 1, by = interval)) {
+  
+  # Filter Remote_Data based on the current interval for Predicted values
+  Data_interval <- Remote_Data %>%
+    filter(Estimated > i & Estimated <= i + interval)
+  
+  # Filter filtered_data based on the current interval for Actual values
+  set_interval <- filtered_data %>%
+    filter(Actual > i & Actual <= i + interval)
+  
+  # Check if there are sufficient MAE values to proceed
+  if (nrow(set_interval) > 1 && all(!is.na(set_interval$MAE))) {
+    
+    # Add 1 to MAE values for fitting
+    data_test <- set_interval$MAE + 1
+    
+    # Check for valid values in data_test
+    data_test <- data_test[!is.na(data_test) & is.finite(data_test)]
+    
+    if (length(data_test) > 1) {
+      # Fit a log-normal distribution to data_test
+      fit <- fitdist(data_test, "lnorm")
+      
+      # Extract parameters from the fit
+      meanlog <- fit$estimate["meanlog"]
+      sdlog <- fit$estimate["sdlog"]
+      
+      # Add a new column with random values from the log-normal distribution
+      Data_interval <- Data_interval %>%
+        mutate(Random_noise = rlnorm(n(), meanlog, sdlog) - 1)
+      
+      # Store the result in the list
+      results[[paste0("Data_", i, "_", i + 0.1)]] <- Data_interval
+    }
+  }
+}
+
+# Combine all intervals into a single dataframe if needed
+final_data <- bind_rows(results)
+
+final_data$Noise <- final_data$Estimated*(1+final_data$Random_noise)
+
+# We divide the temporal granularity (we)
+#Evaluation
+
+Data <- final_data%>%mutate(date= as.Date(Date))%>%mutate(Year = year(Date), Month = month(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))
+
+Data <- Data%>%filter(Year < 2019)
+
+Data <- Data%>%mutate(ID_Year = paste(ID, Year, sep = "_"))
+
+#By Season 
+
+Season_ID <- Data %>%
+  group_by(ID, Year) %>%
+  summarise(Season_Count = n_distinct(Season)) %>%
+  filter(Season_Count >= 3) %>%
+  mutate(ID_Year = paste(ID, Year, sep = "_")) # Criteria to consider year will all seasons
+
+Filtered_Data <- Data %>%
+  filter(ID_Year %in% Season_ID$ID_Year)
+
+#Averaging 
+
+Data_Average_Season <- Filtered_Data%>%group_by(ID, Year, Season)%>%summarise(TP_Season = mean(Estimated), TP_Noise_Season = mean(Noise)) # Check all season every year
+Data_Year <- Data_Average_Season%>%group_by(ID, Year)%>%summarise(TP = mean(TP_Season), Noise = mean(TP_Noise_Season))
+
+
+# Trend Analysis
+
+#install.packages("trend")
+library(trend)
+library(mblm)
+
+Year_ID <- Data_Year %>%
+  group_by(ID) %>%
+  summarise(Year_Count = n_distinct(Year)) %>%
+  filter(Year_Count >= 15) # Criteria
+
+Data_S_Y <- Data_Year %>%
+  filter(ID %in% Year_ID$ID)
+
+IDS <- unique(Data_S_Y$ID)
+
+Reach_Trend <- data.frame()
+
+cl <- makePSOCKcluster(detectCores() - 2)
+registerDoParallel(cl)
+j = 1
+
+for (i in IDS) {
+  
+
+  Data_filter <- Data_S_Y %>% filter(ID == i)
+  
+  Years <- Data_filter %>%
+      group_by(ID) %>%
+      summarise(Year_Number = n_distinct(Year)) %>%
+      pull(Year_Number)
+
+  # Mann Kendall Test
+  result_two_sided <- mk.test(Data_filter$TP, alternative = "two.sided")
+  pvalue <- result_two_sided$p.value
+  tau <- as.data.frame(result_two_sided$estimates)$`result_two_sided$estimates`[3]
+  
+  result_two_sided_n <- mk.test(Data_filter$Noise, alternative = "two.sided")
+  pvalue_n <- result_two_sided_n$p.value
+  tau_n <- as.data.frame(result_two_sided_n$estimates)$`result_two_sided_n$estimates`[3]
+  
+  # Theil Sen Estimator
+  theil_sen_result <- mblm(TP ~ Year, data = Data_filter)
+  rate <- as.numeric(theil_sen_result$coefficients[2])
+  rate_avg <- (rate / mean(Data_filter$TP))*100
+  
+  theil_sen_result_n <- mblm(Noise ~ Year, data = Data_filter)
+  rate_n <- as.numeric(theil_sen_result_n$coefficients[2])
+  rate_avg_n <- (rate / mean(Data_filter$Noise))*100
+  
+  ID_Trend_value <- data.frame(ID = i, p = pvalue, TAU_Value = tau, Rate = rate, RatePercent = rate_avg, Num_Years = Years) %>%
+    mutate(Trend_Type = ifelse(tau < 0, "Decreasing", "Increasing"),
+           p_n = pvalue_n, TAU_Value_n = tau_n, Rate_n = rate_n, RatePercent_n = rate_avg_n, Num_Years = Years) %>%
+    mutate(Trend_Type_n = ifelse(tau_n < 0, "Decreasing", "Increasing")
+           
+           )
+  
+  
+  
+  Reach_Trend <- rbind(Reach_Trend, ID_Trend_value)
+  
+  print(j)
+  j = j+1
+  
+}
+
+
+stopCluster(cl)
+write.csv(Reach_Trend,"C:\\Research\\TP Trend\\analysis\\uncertainity\\cache\\Reach_Level_Trend_Original_Uncertainity_All_seed_119.csv")
+```
+
+```{r}
+# Assuming your DataFrame is named 'data'
+
+# Create a linear model with y = RatePercent_n and x = RatePercent
+model <- lm(RatePercent_n ~ RatePercent, data = Reach_Trend)
+
+# Extract the R-squared value from the model summary
+r_squared <- summary(model)$r.squared
+
+# Print the R-squared value
+print(r_squared)
+
+
+
+```

@@ -1,0 +1,164 @@
+#Library
+```{r}
+source("C:\\Research\\TP Analysis\\Library\\Library.R")
+```
+#Data
+```{r}
+Remote_Data <- read_feather("C:\\Research\\TP Analysis\\Data\\Remote Data\\CLEAR-TP.feather") #33497
+NHD_Shape <- st_read("C:\\Research\\TP Analysis\\Shape File\\NHDShapeFile\\nhdplusv2_modified_v1.0.shp")
+
+NHD_Shape_Eco <- st_read("C:\\Research\\TP Analysis\\Shape File\\Ecological_Region_Matchup\\Ecological_NHD.shp")
+NHD_Shape_Eco <- NHD_Shape_Eco %>%select(ID, LEVEL1)
+
+```
+#Averaging
+```{r}
+Remote_Data <- Remote_Data%>%mutate(date= as.Date(Date))%>%mutate(Year = year(Date), Month = month(Date))%>%
+  mutate(Season = case_when(
+    Month %in% 3:5 ~ "Spring",
+    Month %in% 6:8 ~ "Summer",
+    Month %in% 9:11 ~ "Autumn",
+    TRUE ~ "Winter" ))
+
+Remote_Data <- Remote_Data%>%filter(Year > 2014 & Year < 2019)
+Remote_Data_season <- Remote_Data%>%group_by(ID, Year, Season)%>%summarise(TP = mean(Estimated))%>%mutate(ID_filter = paste0(ID, "_", Year))
+
+Remote_Groups <- Remote_Data%>%group_by(ID, Year)%>%summarise(Count = n_distinct(Season))%>%filter(Count >2)%>%mutate(ID_filter= paste0(ID, "_", Year))
+```
+#Tabling
+```{r}
+library(data.table)
+
+# Convert Remote_Data_season to data.table
+setDT(Remote_Data_season)
+
+# Convert Remote_Groups to data.table
+setDT(Remote_Groups)
+
+# Filter Remote_Data_season based on ID_filter in Remote_Groups
+Remote_Data_season <- Remote_Data_season[Remote_Groups, on = "ID_filter"]
+
+Remote_Avergae <- Remote_Data_season%>%group_by(ID)%>%summarise(TP = mean(TP))
+```
+
+#Conditions
+```{r}
+NHD_Shape_Eco <- NHD_Shape_Eco %>%
+  select(ID, LEVEL1)
+
+NHD_Shape_Eco$LEVEL1[is.na(NHD_Shape_Eco$LEVEL1)] <- 10
+
+value_mapping <- c(`1` = 47, 
+                   `2` = 10, 
+                   `3` = 21.88, 
+                   `4` = 23, 
+                   `5` = 67, 
+                   `6` = 76.25, 
+                   `7` = 33, 
+                   `8` = 10, 
+                   `9` = 36.56, 
+                   `10` = 128, 
+                   `11` = 10.0, 
+                   `12` = 40.0, 
+                   `15` = 31.25)
+
+ Remote_Data <- Remote_Data %>%
+   left_join(NHD_Shape_Eco, by = "ID") %>%
+   drop_na() %>%
+   mutate(VALUE = value_mapping[as.character(LEVEL1)])
+
+Remote_Data <- Remote_Data%>%mutate(Threshold = VALUE/1000)
+
+Remote_Data <- Remote_Data %>%mutate(Condition = ifelse(Estimated < Threshold, "Good", "Poor"))
+```
+
+#Criteria
+```{r} 
+Remote_Avergae <- Remote_Avergae%>%
+   left_join(NHD_Shape_Eco, by = "ID") %>%
+   st_drop_geometry(geometry)%>%
+   #drop_na() %>%
+   mutate(VALUE = value_mapping[as.character(LEVEL1)])%>%
+  mutate(Threshold = VALUE/1000)%>%
+  mutate(Condition = ifelse(TP < Threshold, "Good", "Poor"))
+
+Remote_Avergae <- Remote_Avergae%>%left_join(NHD_Shape, by = "ID")
+
+# Filter rows in NHD_Shape based on matching IDs in Remote_Average
+filtered_NHD_Shape <- NHD_Shape[NHD_Shape$ID %in% Remote_Avergae$ID, ]
+
+```
+
+#Analysis
+```{r}
+Remote_Avergae_bad <- Remote_Avergae%>%filter(Condition == "Good")
+Remote_Avergae_good <- Remote_Avergae%>%filter(Condition == "Poor")
+
+sum(Remote_Avergae_bad$LENGTHKM_)
+sum(Remote_Avergae_good$LENGTHKM_)
+```
+#Figure
+```{r}
+# Set the CRS
+crs <- st_crs(2163)
+
+# Get the map data for the US
+us <- ne_countries(scale = "medium", country = "United States of America", returnclass = "sf")
+
+# Transform to the desired CRS
+us_transformed <- st_transform(us, crs)
+
+# Calculate breaks for skewed distribution
+breaks <- c(1, 20, 49)
+
+# Define labels for breaks
+labels <- c("1", "20", "50+")
+
+Conditions <- Remote_Avergae%>%select("ID", "Condition")
+NHD_Shape_Condition <- NHD_Shape%>%left_join(Conditions, by ="ID")
+
+usaplotTP_change <- ggplot() + 
+  geom_sf(data = us_transformed, fill = "grey0", color = "grey0", lwd = 0.8) +
+  geom_sf(data = NHD_Shape_Condition, aes(color = Condition), lwd = NHD_Shape$StrmOrd / 5) +
+  scale_color_manual(
+    values = c("Good" = "#008ECE", "Poor" = "#FF6F61"),
+    na.value = "grey",       # Define color for NA values
+    na.translate = TRUE,      # Enable display of NA in legend
+    labels = c("Good", "Poor", "No Data")  # Add "No Data" for NA
+  ) + 
+  coord_sf(crs = st_crs(2163), xlim = c(-2500000, 2500000), ylim = c(-2300000, 730000)) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    legend.title = element_text(size = 18),
+    legend.text = element_text(size = 18),
+    legend.key.size = unit(2.5, "lines"),
+    plot.title = element_text(size = 20),
+    legend.position = "bottom"
+  ) +
+  labs(title = "", color = "") +
+  guides(
+    color = guide_legend(
+      nrow = 1, 
+      byrow = TRUE, 
+      override.aes = list(size = 3, lwd =5)  # Increase line thickness in legend
+    )
+  )
+print(usaplotTP_change)
+
+# Save the plot
+ggsave("C:\\Research\\TP Analysis\\Figures\\Figure 1\\Eco_Criteria.png", plot = usaplotTP_change, width = 10, height = 8, units = "in", dpi = 1000)
+
+```
+
+```{r}
+
+E
+
+
+```
